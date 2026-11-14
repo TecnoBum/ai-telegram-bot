@@ -7,12 +7,14 @@ Bot de Telegram 100% gratis y sin llaves, con **chat generativo con memoria**, r
 - **Webhook:** `https://ai-telegram-bot-rho.vercel.app/api/webhook`
 - **Repo:** https://github.com/TecnoBum/ai-telegram-bot
 
-## Qué hace (v2)
+## Qué hace (v2.1)
 
 **💬 Chat generativo con memoria**
 - Escribe lo que sea: responde con contexto de la conversación (últimos 10 intercambios, 7 días).
 - `/nuevo` — empezar de cero · `/nombre <nombre>` — te llama por tu nombre.
 - `/recordar <nota>` · `/notas` · `/olvidar [n]` — notas guardadas.
+
+**🗣️ Lenguaje natural (v2.1, sin comandos):** el bot entiende pedidos con palabras normales y ejecuta la acción: «cuéntame un chiste», «cómo está el dólar», «qué hora es en Madrid», «hazme un QR de mi web», «busca la canción Chan Chan», «100 dólares a CUP», «qué es un agujero negro», «me llamo Johan», «recuerda que tengo que llamar a Ana», «haz una encuesta: ¿Pizza o pasta? | Pizza | Pasta», «tira un dado». Si falta un dato (por ejemplo la ciudad del clima), pregunta y usa tu siguiente mensaje como respuesta. Si no entiende la intención, responde con el chat normal.
 
 **✨ Crear con IA** (Pollinations, GPT-OSS 20B, sin llave): `/codigo`, `/resumir` (texto o mensaje respondido), `/explica`, `/idea`, `/poema`, `/historia`, `/receta`, `/horoscopo`, `/define`, `/consejo`, `/chiste` (JokeAPI).
 

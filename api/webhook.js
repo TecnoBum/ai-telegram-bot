@@ -1,4 +1,4 @@
-// Bot de Telegram multi-herramienta 100% GRATIS y SIN LLAVES — webhook para Vercel (v2).
+// Bot de Telegram multi-herramienta 100% GRATIS y SIN LLAVES — webhook para Vercel (v2.1).
 // Chat generativo con memoria (KV de Vercel/Upstash, con fallback en memoria),
 // respuestas con formato, y herramientas de todo tipo, todas sin registrarse:
 //   Chat IA + código + resumir/explicar/ideas/poemas/historias/recetas/horóscopo:
@@ -159,7 +159,7 @@ async function kvCmd(cmd) {
       method: "POST",
       headers: { Authorization: `Bearer ${KV_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify(cmd),
-    }, 8000);
+    }, 3000); // KV lento no puede frenar la respuesta: 3 s como máximo
     const j = await r.json().catch(() => ({}));
     if (j.error) {
       console.error("KV error", String(j.error).slice(0, 200));
@@ -253,8 +253,9 @@ async function chatAI(chatId, userText, userName) {
   const history = await getHistory(chatId);
   const messages = [{ role: "system", content: personaPrompt(userName) }, ...history, { role: "user", content: userText }];
   const answer = await askAI(messages);
-  await pushHistory(chatId, "user", userText);
-  await pushHistory(chatId, "assistant", answer);
+  // Guardar el historial sin esperar: la respuesta no debe frenarse por KV.
+  pushHistory(chatId, "user", userText).catch(() => {});
+  pushHistory(chatId, "assistant", answer).catch(() => {});
   return answer;
 }
 async function oneShot(prompt, system) {
@@ -464,6 +465,7 @@ function startText() {
     "Hola, soy Bumi, tu bot multi-IA de TecnoBum. Todo gratis y sin llaves, y ahora recuerdo nuestra conversación.\n\n" +
     "💬 Chat generativo\n" +
     "• Escríbeme lo que sea y te respondo con memoria\n" +
+    "• Y entiende pedidos con palabras normales, sin comandos: «cuéntame un chiste», «cómo está el dólar», «hazme un QR de mi web», «qué hora es en Madrid»\n" +
     "• /nuevo — empezar una conversación nueva\n" +
     "• /nombre <tu nombre> — para que te llame por tu nombre\n\n" +
     "✨ Crear con IA\n" +
@@ -504,6 +506,175 @@ function startText() {
   );
 }
 
+// ---- Lenguaje natural: entender pedidos sin comandos ----
+const pendingKey = (chatId) => `pending:${chatId}`;
+function norm(s) {
+  return String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ").trim();
+}
+// Como norm() pero con mapa de índices: permite extraer el argumento del texto
+// original (con mayúsculas y tildes) a partir de una coincidencia en el texto normalizado.
+function normMap(s) {
+  const orig = String(s || "");
+  let out = "";
+  const map = [];
+  let prevSpace = true;
+  for (let i = 0; i < orig.length; i++) {
+    const n = orig[i].toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+    for (const c of n) {
+      if (c === " " || c === "\t" || c === "\n" || c === "\r") {
+        if (prevSpace) continue;
+        prevSpace = true;
+        out += " ";
+        map.push(i);
+      } else {
+        prevSpace = false;
+        out += c;
+        map.push(i);
+      }
+    }
+  }
+  if (prevSpace && out.endsWith(" ")) {
+    out = out.slice(0, -1);
+    map.pop();
+  }
+  return { text: out, map };
+}
+const CURR = {
+  dolar: "USD", dolares: "USD", usd: "USD", euro: "EUR", euros: "EUR", eur: "EUR",
+  peso: "CUP", pesos: "CUP", cup: "CUP", mlc: "MLC", libra: "GBP", libras: "GBP", gbp: "GBP",
+  "peso mexicano": "MXN", "pesos mexicanos": "MXN", mxn: "MXN", real: "BRL", reales: "BRL", brl: "BRL",
+  yen: "JPY", yenes: "JPY", jpy: "JPY",
+};
+const CITY_TZ = {
+  "la habana": "America/Havana", habana: "America/Havana", madrid: "Europe/Madrid",
+  barcelona: "Europe/Madrid", miami: "America/New_York", "nueva york": "America/New_York",
+  mexico: "America/Mexico_City", "ciudad de mexico": "America/Mexico_City",
+  "buenos aires": "America/Argentina/Buenos_Aires", bogota: "America/Bogota",
+  caracas: "America/Caracas", lima: "America/Lima", santiago: "America/Santiago",
+  "sao paulo": "America/Sao_Paulo", londres: "Europe/London", paris: "Europe/Paris",
+  berlin: "Europe/Berlin", tokio: "Asia/Tokyo", pekin: "Asia/Shanghai", moscu: "Europe/Moscow",
+  toronto: "America/Toronto", "los angeles": "America/Los_Angeles",
+  roma: "Europe/Rome", lisboa: "Europe/Lisbon",
+};
+function timeForCity(city) {
+  const tz = CITY_TZ[norm(city)];
+  if (!tz) return `No sé la zona horaria de ${city}.\n\n${cubaTime()}`;
+  const s = new Date().toLocaleString("es-ES", {
+    timeZone: tz, weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit",
+  });
+  return `${city}: ${s}`;
+}
+// Devuelve {action, arg} para ejecutar, {ask, action} para preguntar qué falta,
+// o null si es conversación normal (cae al chat con memoria).
+function detectIntent(text, msg) {
+  const { text: t, map } = normMap(text);
+  // g(m, i): grupo i de la coincidencia, recortado del texto ORIGINAL (con mayúsculas y tildes).
+  const g = (m, i) => {
+    const idx = m.indices && m.indices[i];
+    if (!idx || idx[0] == null || idx[1] <= idx[0]) return "";
+    return text.slice(map[idx[0]], map[idx[1] - 1] + 1);
+  };
+  const reply = repliedText(msg);
+  const ask = (action, question) => ({ ask: question, action });
+  let m;
+  if (/^(que puedes hacer|que sabes hacer|ayuda|que comandos tienes|muestrame los comandos|que puedes hacer por mi)/.test(t))
+    return { action: "start", arg: "" };
+  if (/(empezamos de nuevo|empecemos de cero|olvida lo que hablamos|borra la conversacion|empezar de nuevo|empezar desde cero)/.test(t))
+    return { action: "nuevo", arg: "" };
+  m = t.match(/^(me llamo|mi nombre es)\s+(.+)$/d);
+  if (m) return { action: "nombre", arg: g(m, 2) };
+  m = t.match(/^(recuerda que|anota|apunta|guarda que|recuerdame)\s+(.+)$/d);
+  if (m) return { action: "recordar", arg: g(m, 2) };
+  if (/^(que tengo guardado|que me anotaste|mis notas|que notas tengo|ver mis notas)$/.test(t))
+    return { action: "notas", arg: "" };
+  m = t.match(/^(olvida|borra)\s+(la nota|mis notas|todo)(?:\s+(\d+))?$/d);
+  if (m) return { action: "olvidar", arg: g(m, 3) };
+  if (/\bchiste\b/.test(t) || /hazme reir/.test(t)) return { action: "chiste", arg: "" };
+  if (/(tira|lanza)\s+(un|el)\s+dado/.test(t)) return { action: "dado", arg: "" };
+  if (/dame un consejo/.test(t) || t === "un consejo") return { action: "consejo", arg: "" };
+  m = t.match(/que hora es(?:\s+en\s+(.+))?/d);
+  if (m) return { action: "hora", arg: g(m, 1) };
+  m = t.match(/(\d+(?:[.,]\d+)?)\s*([a-z ]+?)\s+(?:en|a)\s+([a-z ]+)/d);
+  if (m) {
+    const from = CURR[norm(g(m, 2))];
+    const toW = norm(g(m, 3));
+    const to = CURR[toW] || CURR[toW.split(/\s+/).slice(0, 2).join(" ")] || CURR[toW.split(/\s+/)[0]];
+    if (from && to) return { action: "convertir", arg: `${g(m, 1).replace(",", ".")} ${from} ${to}` };
+  }
+  if (/dolar/.test(t) && /(cuanto|precio|a cuanto|como esta|tasa)/.test(t)) return { action: "dolar", arg: "" };
+  m = t.match(/(precio|cuanto vale|a cuanto esta|cuanto cuesta)\s+(?:el\s+|la\s+)?(bitcoin|btc|ethereum|eth|usdt|tether|solana|sol|xrp|dogecoin|doge|cardano|ada|tron|trx|litecoin|ltc|bnb)\b/d);
+  if (m) return { action: "precio", arg: g(m, 2) };
+  m = t.match(/^precio\s+(?:del\s+|de\s+)?(bitcoin|btc|ethereum|eth|usdt|tether|solana|sol|xrp|dogecoin|doge|cardano|ada|tron|trx|litecoin|ltc|bnb)\b/d);
+  if (m) return { action: "precio", arg: g(m, 1) };
+  const climaQ = "¿En qué ciudad quieres el clima?";
+  m = t.match(/^(?:el\s+)?clima(?:\s+(?:en|de|para)\s+(.+))?$/d);
+  if (m) return g(m, 1) ? { action: "clima", arg: g(m, 1) } : ask("clima", climaQ);
+  m = t.match(/^como esta el clima(?:\s+en\s+(.+))?$/d);
+  if (m) return g(m, 1) ? { action: "clima", arg: g(m, 1) } : ask("clima", climaQ);
+  m = t.match(/^que tal el clima(?:\s+en\s+(.+))?$/d);
+  if (m) return g(m, 1) ? { action: "clima", arg: g(m, 1) } : ask("clima", climaQ);
+  m = t.match(/^dime el clima(?:\s+en\s+(.+))?$/d);
+  if (m) return g(m, 1) ? { action: "clima", arg: g(m, 1) } : ask("clima", climaQ);
+  m = t.match(/^que clima(?: hay)?(?:\s+en\s+(.+))?$/d);
+  if (m) return g(m, 1) ? { action: "clima", arg: g(m, 1) } : ask("clima", climaQ);
+  m = t.match(/que\s+tiempo\s+hace(?:\s+en\s+(.+))?$/d);
+  if (m) return g(m, 1) ? { action: "clima", arg: g(m, 1) } : ask("clima", climaQ);
+  m = t.match(/como\s+esta\s+el\s+tiempo(?:\s+en\s+(.+))?$/d);
+  if (m) return g(m, 1) ? { action: "clima", arg: g(m, 1) } : ask("clima", climaQ);
+  m = t.match(/hace\s+(frio|calor)\s+en\s+(.+)/d);
+  if (m) return { action: "clima", arg: g(m, 2) };
+  m = t.match(/noticias(?:\s+(?:de|sobre)\s+(.+))?/d);
+  if (m) return { action: "noticias", arg: g(m, 1) };
+  if (/ultimas noticias/.test(t)) return { action: "noticias", arg: "" };
+  m = t.match(/que pasa en\s+(.+)/d);
+  if (m) return { action: "noticias", arg: g(m, 1) };
+  m = t.match(/como se dice\s+(.+?)\s+en\s+(ingles|espanol)/d);
+  if (m) return { action: "traducir", arg: g(m, 1) };
+  m = t.match(/^(traduce|traduceme)\s+(esto:?)?\s*(.+)?$/d);
+  if (m) return g(m, 3) ? { action: "traducir", arg: g(m, 3) } : reply ? { action: "traducir", arg: "" } : ask("traducir", "¿Qué texto traduzco?");
+  m = t.match(/^(resumeme|resume|hazme un resumen(?: de)?|resumen de)\s*(esto:?)?\s*(.+)?$/d);
+  if (m) return g(m, 3) ? { action: "resumir", arg: g(m, 3) } : reply ? { action: "resumir", arg: "" } : ask("resumir", "Pásame el texto que quieres resumir.");
+  m = t.match(/^(explicame|explica)\s+(.+)$/d);
+  if (m) return { action: "explica", arg: g(m, 2) };
+  m = t.match(/^que significa\s+(.+)$/d);
+  if (m) return { action: "define", arg: g(m, 1) };
+  m = t.match(/^(dame\s+)?ideas?\s+(para|de|sobre)?\s*(.+)$/d);
+  if (m && g(m, 3)) return { action: "idea", arg: g(m, 3) };
+  m = t.match(/^(hazme|escribeme|crea|escribe)\s+un\s+poema\s*(?:de|sobre)?\s*(.+)?$/d);
+  if (m) return { action: "poema", arg: g(m, 2) };
+  m = t.match(/^(cuentame|dime|escribe)\s+(un\s+)?(cuento|historia)\s*(?:de|sobre)?\s*(.+)?$/d);
+  if (m) return { action: "historia", arg: g(m, 4) };
+  m = t.match(/^(receta de|como se hace|como cocino|como preparo|como se prepara)\s+(.+)$/d);
+  if (m) return { action: "receta", arg: g(m, 2) };
+  m = t.match(/^horoscopo(?:\s+(?:de|del)\s+(.+))?$/d);
+  if (m) return g(m, 1) ? { action: "horoscopo", arg: g(m, 1) } : ask("horoscopo", "¿De qué signo? Por ejemplo: leo, aries.");
+  if (/que dice mi horoscopo/.test(t)) return ask("horoscopo", "¿De qué signo? Por ejemplo: leo, aries.");
+  m = t.match(/^(crea|haz|genera|dibujame|creame|hazme|quiero)\s+(una\s+)?(imagen|foto|dibujo)\s+(?:de\s+)?(.+)$/d);
+  if (m) return { action: "img", arg: g(m, 4) };
+  m = t.match(/^imagen\s+de\s+(.+)$/d);
+  if (m) return { action: "img", arg: g(m, 1) };
+  m = t.match(/^(leeme|lee esto|dime esto en voz|leelo)(:?)\s*(.+)?$/d);
+  if (m) return g(m, 3) ? { action: "voz", arg: g(m, 3) } : reply ? { action: "voz", arg: "" } : ask("voz", "¿Qué texto quieres escuchar?");
+  m = t.match(/^(haz|crea|generame|hazme)\s+(un\s+)?(codigo\s+)?qr\s*(?:de|para|con)?\s*(.+)?$/d);
+  if (m) return g(m, 4) ? { action: "qr", arg: g(m, 4) } : ask("qr", "¿Qué pongo en el QR? Puede ser un texto o un enlace.");
+  m = t.match(/^qr\s+(?:de\s+)?(.+)$/d);
+  if (m) return { action: "qr", arg: g(m, 1) };
+  m = t.match(/https?:\/\/\S+/d);
+  if (/acorta/.test(t) && m) return { action: "acortar", arg: g(m, 0) };
+  if (/acorta/.test(t)) return ask("acortar", "Pásame el enlace que quieres acortar.");
+  m = t.match(/^(busca|buscame|pon|reproduce)\s+(la\s+)?cancion\s+(.+)$/d);
+  if (m) return { action: "musica", arg: g(m, 3) };
+  m = t.match(/^quiero escuchar\s+(.+)$/d);
+  if (m) return { action: "musica", arg: g(m, 1) };
+  m = t.match(/^(que es|quien es|que sabes de|hablame de|dime que es)\s+(.+)$/d);
+  if (m) return { action: "wiki", arg: g(m, 2) };
+  m = t.match(/^(haz|crea)\s+una\s+encuesta[:\s]+(.+)$/d);
+  if (m) return { action: "encuesta", arg: g(m, 2) };
+  m = t.match(/^(escribeme|hazme|creame)\s+(un\s+)?(codigo|programa|script|funcion)\b\s*(.+)?$/d);
+  if (m) return g(m, 4) ? { action: "codigo", arg: g(m, 4) } : ask("codigo", "¿Qué código quieres que escriba?");
+  return null;
+}
+
 // ---- Manejadores ----
 function repliedText(msg) {
   return (msg.reply_to_message?.text || "").trim();
@@ -520,8 +691,32 @@ async function handleMessage(msg) {
   }
   if (!text) return;
 
-  const cmd = (name) => text === name || text.startsWith(name + " ") || text.startsWith(name + "@");
-  const arg = (name) => text.replace(new RegExp("^" + name + "(@\\w+)?\\s*"), "").trim();
+  // Lenguaje natural: sin comandos, el bot entiende qué quieres y lo hace.
+  // Si no entiende la intención, cae al chat con memoria de abajo.
+  let effective = text;
+  if (text.startsWith("/")) {
+    await storeDel(pendingKey(chatId));
+  } else {
+    const intent = detectIntent(text, msg);
+    if (intent) {
+      if (intent.ask) {
+        await storeSet(pendingKey(chatId), { action: intent.action }, 600);
+        await sendMessage(chatId, intent.ask);
+        return;
+      }
+      await storeDel(pendingKey(chatId));
+      effective = "/" + intent.action + (intent.arg ? " " + intent.arg : "");
+    } else {
+      const pending = await storeGet(pendingKey(chatId));
+      if (pending?.action) {
+        await storeDel(pendingKey(chatId));
+        effective = "/" + pending.action + " " + text;
+      }
+    }
+  }
+
+  const cmd = (name) => effective === name || effective.startsWith(name + " ") || effective.startsWith(name + "@");
+  const arg = (name) => effective.replace(new RegExp("^" + name + "(@\\w+)?\\s*"), "").trim();
   const userName = await storeGet(nameKey(chatId)).catch(() => null);
 
   try {
@@ -861,10 +1056,11 @@ async function handleMessage(msg) {
       return;
     }
     if (cmd("/hora")) {
-      await sendMessage(chatId, cubaTime());
+      const city = arg("/hora");
+      await sendMessage(chatId, city ? timeForCity(city) : cubaTime());
       return;
     }
-    if (text.startsWith("/")) {
+    if (effective.startsWith("/")) {
       await sendMessage(chatId, "No conozco ese comando. Prueba /help.");
       return;
     }
