@@ -1,4 +1,4 @@
-// Bot de Telegram multi-herramienta 100% GRATIS y SIN LLAVES — webhook para Vercel (v2.1).
+// Bot de Telegram multi-herramienta 100% GRATIS y SIN LLAVES — webhook para Vercel (v2.2).
 // Chat generativo con memoria (KV de Vercel/Upstash, con fallback en memoria),
 // respuestas con formato, y herramientas de todo tipo, todas sin registrarse:
 //   Chat IA + código + resumir/explicar/ideas/poemas/historias/recetas/horóscopo:
@@ -227,23 +227,51 @@ function personaPrompt(userName) {
   if (userName) p += ` El usuario se llama ${userName}; úsalo de vez en cuando de forma natural.`;
   return p;
 }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function pollinations(messages, opts = {}) {
-  const r = await fetchWithTimeout("https://text.pollinations.ai/", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "openai",
-      messages,
-      temperature: opts.temperature ?? 0.7,
-      max_tokens: opts.maxTokens ?? 2500,
-      seed: Math.floor(Math.random() * 100000),
-    }),
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j?.error?.message || j?.error || `HTTP ${r.status}`);
-  const text = j?.choices?.[0]?.message?.content;
-  if (!text) throw new Error("respuesta vacía del modelo");
-  return String(text).trim();
+  // Pollinations (tier anónimo) devuelve TEXTO PLANO, no JSON con choices,
+  // y a veces 402 "Free limit reached: 1 reply every 45 seconds per IP".
+  // El código viejo hacía r.json() sobre ese texto, sacaba choices undefined
+  // y lanzaba "respuesta vacía del modelo" en TODOS los mensajes normales.
+  const models = ["openai", "openai-fast"];
+  let lastErr = new Error("respuesta vacía del modelo");
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const model = models[Math.min(attempt, models.length - 1)];
+    let waitHint = 0;
+    try {
+      const r = await fetchWithTimeout("https://text.pollinations.ai/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature: opts.temperature ?? 0.7,
+          max_tokens: opts.maxTokens ?? 2500,
+          seed: Math.floor(Math.random() * 100000),
+        }),
+      });
+      const raw = await r.text().catch(() => "");
+      const m = /wait (\d+) seconds/i.exec(raw);
+      if (m) waitHint = Math.min(+m[1], 12);
+      let text = "";
+      let parsed = null;
+      try { parsed = JSON.parse(raw); } catch { parsed = null; }
+      if (parsed && typeof parsed === "object") {
+        if (parsed.error) throw new Error(typeof parsed.error === "string" ? parsed.error : parsed.error?.message || `HTTP ${r.status}`);
+        text = parsed?.choices?.[0]?.message?.content || parsed?.choices?.[0]?.text || "";
+      } else if (r.ok) {
+        text = raw.trim(); // texto plano: el cuerpo ES la respuesta
+      }
+      if (text) return String(text).trim();
+      lastErr = new Error("respuesta vacía del modelo");
+      console.error("Pollinations vacía", `HTTP ${r.status} modelo ${model} cuerpo: ${raw.slice(0, 200)}`);
+    } catch (e) {
+      lastErr = e;
+      console.error("Pollinations fallo", String(e).slice(0, 200));
+    }
+    if (attempt < 3) await sleep((waitHint || 4 + attempt * 4) * 1000);
+  }
+  throw lastErr;
 }
 async function askAI(messages, opts) {
   return pollinations(messages, opts);
@@ -1077,7 +1105,7 @@ async function handleMessage(msg) {
 // ---- Webhook ----
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    res.status(200).json({ ok: true, bot: "ai-telegram-bot", webhook: "POST updates here" });
+    res.status(200).json({ ok: true, bot: "ai-telegram-bot", version: "2.2", webhook: "POST updates here" });
     return;
   }
   if (SECRET) {
