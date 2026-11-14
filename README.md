@@ -1,41 +1,50 @@
-# Bot de Telegram multi-IA gratis
+# Bot de Telegram multi-herramienta 100% gratis
 
-Bot personal de Johan: escribe un mensaje y responde una IA; `/model` cambia
-de modelo, `/img <descripción>` genera una imagen.
+Bot personal de Johan (@bumiaabot): chat con IA y herramientas de todo tipo,
+todas gratuitas y SIN llaves ni registros.
 
 ## Estado (14 nov 2026)
 
-- Código listo en `api/webhook.js` (sin dependencias, webhook en Vercel).
+- Código en `~/workspace/ai-telegram-bot/` (webhook Vercel sin dependencias).
+- Repo en GitHub: https://github.com/TecnoBum/ai-telegram-bot (público, creado vía
+  navegador — la app de Muse no puede crear repos, 403).
+- Bot verificado con getMe: @bumiaabot («bumiabot»). Token recibido por chat
+  (uso transitorio, NO se guarda en archivos ni en memoria).
 - **BLOQUEO: Vercel devuelve 403 en el equipo `tecnobum`** («Not authorized:
   Trying to access resource under scope tecnobum»). El token se refrescó y
-  sigue igual; la herramienta `authorize_team_access` no está expuesta en el
-  MCP. Hay que desconectar y reconectar Vercel (con aprobación de Johan) para
-  que la conexión vuelva a tener acceso al equipo, y luego crear el proyecto.
-- Falta el token del bot (Johan lo crea en @BotFather y lo pega en el chat,
-  como hizo con @KlikTienda_bot).
+  sigue igual; `authorize_team_access` no está expuesta en el MCP. Para que el
+  bot corra hace falta un servidor: reconectar Vercel (con aprobación de
+  Johan) o buscar otro host. GitHub solo hospeda el código: Pages es estático
+  y Actions no da para un bot en vivo (los minutos gratis no alcanzan).
 
-## IAs gratis verificadas en vivo (14 nov 2026)
+## Herramientas — todas verificadas en vivo el 14 nov 2026, sin llave
 
-| Proveedor | Modelos | Llave |
+| Comando | Qué hace | Servicio |
 |---|---|---|
-| Pollinations texto | GPT-OSS 20B (`openai`) | NO — verificado, responde |
-| Pollinations imagen | Flux (`/img`) | NO — verificado, HTTP 200 |
-| Google Gemini | Gemini 2.5 Flash | Sí, gratis (AI Studio) |
-| Groq | Llama 3.3 70B | Sí, gratis |
-| OpenRouter | Llama 3.3 70B, DeepSeek V3.1, Qwen3 235B, Gemma 3 27B (`:free`) | Sí, gratis |
-| Hugging Face | Llama 3.3 70B, Qwen3 235B, DeepSeek R1 | Sí, gratis |
+| mensaje normal | Chat con IA | Pollinations texto (GPT-OSS 20B) |
+| `/codigo <pedido>` | Escribe código | Pollinations, prompt solo-código |
+| `/img <desc>` | Imagen (flux) | Pollinations imagen |
+| `/img sana: <desc>` | Imagen (sana) | Pollinations imagen |
+| `/voz <texto>` | Audio leído en español | Google Translate TTS (mp3) |
+| `/wiki <tema>` | Resumen de Wikipedia | Wikipedia API |
+| `/clima <ciudad>` | Clima actual | Open-Meteo (geo + forecast) |
+| `/traducir <texto>` | Español ↔ inglés automático | Google Translate |
+| `/convertir <n> <DE> <A>` | Monedas, tasa oficial (incluye CUP) | ExchangeRate-API |
+| `/noticias [tema]` | Titulares del día (por defecto: Cuba) | Google News RSS |
 
-Descartado: DuckDuckGo AI chat — ahora pide resolver un reto anti-bots
-(`x-vqd-hash-1`) y no es fiable para un bot. Pollinations ya solo ofrece
-`openai-fast` en tier anónimo (mistral/llama/deepseek dan 404).
+Descartados tras probarlos: DuckDuckGo AI chat (reto anti-bots), búsqueda web
+por DuckDuckGo HTML (bloqueado), Craiyon (sin respuesta), diccionario
+español de dictionaryapi.dev (sin definiciones). Pollinations texto ya solo
+ofrece `openai-fast` en tier anónimo (mistral/llama/deepseek dan 404).
+**No hay IAs con token en el bot por orden de Johan** (Gemini, Groq,
+OpenRouter y Hugging Face se quitaron el 13 nov 2026).
 
-## Puesta en marcha (cuando Vercel vuelva)
+## Puesta en marcha (cuando haya servidor)
 
 1. Crear proyecto `ai-telegram-bot` en Vercel (create_project).
 2. Guardar el id en `vercel-project.json` y desplegar: `python3 deploy.py`.
 3. Env vars en Vercel (production): `TELEGRAM_BOT_TOKEN`, `WEBHOOK_SECRET`
-   (valor en `.env.local`, no se sube), y opcionales `GEMINI_API_KEY`,
-   `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `HF_TOKEN`.
+   (valor en `.env.local`, no se sube). Sin llaves de IA.
 4. Webhook: `POST https://api.telegram.org/bot<TOKEN>/setWebhook`
    con `url=https://ai-telegram-bot.vercel.app/api/webhook` y
    `secret_token=<WEBHOOK_SECRET>`.
@@ -46,8 +55,9 @@ Descartado: DuckDuckGo AI chat — ahora pide resolver un reto anti-bots
 ## Notas
 
 - Sin memoria de conversación en v1: cada mensaje es independiente.
-  La elección de modelo vive en memoria del proceso (se pierde al
-  reiniciar). v2: persistir modelo + historial en Turso.
+  v2: persistir historial en Turso.
 - Respuestas largas se parten en trozos de 4096 caracteres.
+- `/voz` parte el texto en trozos de 180 caracteres (límite del TTS) y
+  manda un audio por trozo.
 - El token del bot NUNCA se guarda en archivos ni en memoria: uso
   transitorio para ponerlo en Vercel y configurar el webhook.
